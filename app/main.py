@@ -1,94 +1,120 @@
-from fastapi import FastAPI, HTTPException, status
-from pydantic import BaseModel, EmailStr
-from pydantic.dataclasses import dataclass
+from typing import Annotated
+
+from fastapi import Depends, FastAPI, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.database import session
+from app.models import User
+from app.schemas import UserIn, UserOut
 
 app = FastAPI()
 
 
-class UserOut(BaseModel):
-    id: int
-    username: str
-    email: EmailStr
-
-
-class UserIn(BaseModel):
-    username: str
-    email: EmailStr
-    password: str
-
-
-@dataclass
-class UserRow:
-    id: int
-    username: str
-    email: EmailStr
-    password: str
-
-
-def user_out_from_user_row(row: UserRow) -> UserOut:
-    return UserOut(id=row.id, username=row.username, email=row.email)
-
-
-users_table: list[UserRow] = []
-
-
 @app.get("/users/")
-def get_users() -> list[UserOut]:
-    return list(map(user_out_from_user_row, users_table))
+def get_users(
+    session: Annotated[Session, Depends(session)],
+    skip: int = 0,
+    limit: int = 100,
+) -> list[UserOut]:
+    return list(
+        map(
+            UserOut.model_validate,
+            session.scalars(select(User).offset(skip).limit(limit)).all(),
+        )
+    )
 
 
 @app.get("/users/{id}")
-def get_user(id: int) -> UserOut:
-    def is_requested_user_row(row: UserRow) -> bool:
-        return row.id == id
-
-    try:
-        requested_user_row = next(filter(is_requested_user_row, users_table))
-    except StopIteration:
+def get_user(
+    id: int, session: Annotated[Session, Depends(session)]
+) -> UserOut:
+    db_user = session.scalar(select(User).where(User.id == id))
+    if db_user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    return user_out_from_user_row(requested_user_row)
+    return UserOut.model_validate(db_user)
 
 
 @app.post("/users/", status_code=status.HTTP_201_CREATED)
-def post_user(user_in: UserIn) -> UserOut:
-    new_user_row = UserRow(
-        **user_in.model_dump(),
-        id=(1 if len(users_table) == 0 else users_table[-1].id + 1),
+def post_user(
+    user_in: UserIn, session: Annotated[Session, Depends(session)]
+) -> UserOut:
+    db_user = session.scalar(
+        select(User).where(
+            (User.username == user_in.username) | (User.email == user_in.email)
+        )
     )
+    if db_user is not None:
+        if db_user.username == user_in.username:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"User with username {user_in.username} already exists",
+            )
+        else:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"User with email {user_in.email} already exists",
+            )
 
-    users_table.append(new_user_row)
+    db_user = User(
+        username=user_in.username,
+        password=user_in.password,
+        email=user_in.email,
+    )
+    session.add(db_user)
+    session.commit()
+    session.refresh(db_user)
 
-    return user_out_from_user_row(new_user_row)
+    return UserOut.model_validate(db_user)
 
 
 @app.put("/users/{id}")
-def put_user(id: int, user_in: UserIn) -> UserOut:
-    def is_requested_user_row(row: UserRow) -> bool:
-        return row.id == id
-
-    try:
-        requested_user_row = next(filter(is_requested_user_row, users_table))
-    except StopIteration:
+def put_user(
+    id: int, user_in: UserIn, session: Annotated[Session, Depends(session)]
+) -> UserOut:
+    db_user = session.scalar(select(User).where(User.id == id))
+    if db_user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    new_user_row = UserRow(**user_in.model_dump(), id=id)
-    users_table[users_table.index(requested_user_row)] = new_user_row
+    try:
+        db_user.username = user_in.username
+        db_user.password = user_in.password
+        db_user.email = user_in.email
+        session.commit()
+        session.refresh(db_user)
 
-    return user_out_from_user_row(new_user_row)
+        return UserOut.model_validate(db_user)
+
+    except IntegrityError as e:
+        e_orig_str = str(e.orig)
+        if "users.username" in e_orig_str:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"User with username {user_in.username} already exists",
+            )
+        elif "users.email" in e_orig_str:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail=f"User with email {user_in.email} already exists",
+            )
+        else:
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 @app.delete("/users/{id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_user(id: int) -> None:
-    def is_requested_user_row(row: UserRow) -> bool:
-        return row.id == id
-
-    try:
-        requested_user_row = next(filter(is_requested_user_row, users_table))
-    except StopIteration:
+def delete_user(
+    id: int, session: Annotated[Session, Depends(session)]
+) -> None:
+    db_user = session.scalar(select(User).where(User.id == id))
+    if db_user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    del users_table[users_table.index(requested_user_row)]
+    session.delete(db_user)
+    session.commit()
 
 
 @app.get("/")
