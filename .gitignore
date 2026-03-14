@@ -14,6 +14,12 @@ htmlcov/
 # Ruff
 .ruff_cache/
 
-# Virtual environments
+# Environments
+.env
 .venv
+
+# Vercel
 .vercel
+
+# Database
+db.sqlite3
