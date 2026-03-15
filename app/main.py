@@ -1,15 +1,43 @@
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import session
 from app.models import User
-from app.schemas import UserIn, UserOut
+from app.schemas import Token, UserIn, UserOut
+from app.security import (
+    create_access_token,
+    current_user,
+    hash_password,
+    verify_password,
+)
 
 app = FastAPI()
+
+
+@app.post("/token")
+def login_for_access_token(
+    form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+    session: Annotated[Session, Depends(session)],
+) -> Token:
+    user = session.scalar(select(User).where(User.email == form_data.username))
+    if user is None:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password"
+        )
+
+    if not verify_password(form_data.password, user.password):
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password"
+        )
+
+    access_token = create_access_token({"sub": user.email})
+
+    return Token(access_token=access_token, token_type="bearer")
 
 
 @app.get("/users/")
@@ -58,9 +86,11 @@ def post_user(
                 detail=f"User with email {user_in.email} already exists",
             )
 
+    hashed_password = hash_password(user_in.password)
+
     db_user = User(
         username=user_in.username,
-        password=user_in.password,
+        password=hashed_password,
         email=user_in.email,
     )
     session.add(db_user)
@@ -72,20 +102,24 @@ def post_user(
 
 @app.put("/users/{id}")
 def put_user(
-    id: int, user_in: UserIn, session: Annotated[Session, Depends(session)]
+    id: int,
+    user_in: UserIn,
+    session: Annotated[Session, Depends(session)],
+    current_user: Annotated[User, Depends(current_user)],
 ) -> UserOut:
-    db_user = session.scalar(select(User).where(User.id == id))
-    if db_user is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="User not found")
+    if current_user.id != id:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, detail="Not enough permissions"
+        )
 
     try:
-        db_user.username = user_in.username
-        db_user.password = user_in.password
-        db_user.email = user_in.email
+        current_user.username = user_in.username
+        current_user.password = hash_password(user_in.password)
+        current_user.email = user_in.email
         session.commit()
-        session.refresh(db_user)
+        session.refresh(current_user)
 
-        return UserOut.model_validate(db_user)
+        return UserOut.model_validate(current_user)
 
     except IntegrityError as e:
         e_orig_str = str(e.orig)
@@ -107,13 +141,16 @@ def put_user(
 
 @app.delete("/users/{id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_user(
-    id: int, session: Annotated[Session, Depends(session)]
+    id: int,
+    session: Annotated[Session, Depends(session)],
+    current_user: Annotated[User, Depends(current_user)],
 ) -> None:
-    db_user = session.scalar(select(User).where(User.id == id))
-    if db_user is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="User not found")
+    if current_user.id != id:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, detail="Not enough permissions"
+        )
 
-    session.delete(db_user)
+    session.delete(current_user)
     session.commit()
 
 

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Mapper, Session
 from app import database
 from app.main import app
 from app.models import User, table_registry
+from app.security import hash_password
 
 
 @pytest.fixture
@@ -62,11 +63,25 @@ def mock_db_time():
 
 @pytest.fixture
 def user(session: Session):
+    password = "testpassword"
     user = User(
-        username="Test", email="test@test.com", password="testpassword"
+        username="Test",
+        email="test@test.com",
+        password=hash_password(password),
     )
     session.add(user)
     session.commit()
     session.refresh(user)
 
+    user.clean_password = password
+
     return user
+
+
+@pytest.fixture
+def token(client: TestClient, user: User) -> str:
+    response = client.post(
+        "/token",
+        data={"username": user.email, "password": user.clean_password},
+    )
+    return response.json()["access_token"]
